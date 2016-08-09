@@ -25,7 +25,6 @@ import java.util.{Arrays, Comparator, Date}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
-import scala.language.postfixOps
 import scala.util.control.NonFatal
 
 import com.google.common.primitives.Longs
@@ -232,6 +231,10 @@ class SparkHadoopUtil extends Logging {
     recurse(baseStatus)
   }
 
+  def isGlobPath(pattern: Path): Boolean = {
+    pattern.toString.exists("{}[]*?\\".toSet.contains)
+  }
+
   def globPath(pattern: Path): Seq[Path] = {
     val fs = pattern.getFileSystem(conf)
     Option(fs.globStatus(pattern)).map { statuses =>
@@ -240,11 +243,7 @@ class SparkHadoopUtil extends Logging {
   }
 
   def globPathIfNecessary(pattern: Path): Seq[Path] = {
-    if (pattern.toString.exists("{}[]*?\\".toSet.contains)) {
-      globPath(pattern)
-    } else {
-      Seq(pattern)
-    }
+    if (isGlobPath(pattern)) globPath(pattern) else Seq(pattern)
   }
 
   /**

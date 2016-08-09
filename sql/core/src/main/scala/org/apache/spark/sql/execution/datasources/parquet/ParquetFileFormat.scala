@@ -51,7 +51,7 @@ import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types._
 import org.apache.spark.util.SerializableConfiguration
 
-private[sql] class ParquetFileFormat
+class ParquetFileFormat
   extends FileFormat
   with DataSourceRegister
   with Logging
@@ -99,13 +99,13 @@ private[sql] class ParquetFileFormat
     // bundled with `ParquetOutputFormat[Row]`.
     job.setOutputFormatClass(classOf[ParquetOutputFormat[Row]])
 
-    ParquetOutputFormat.setWriteSupportClass(job, classOf[CatalystWriteSupport])
+    ParquetOutputFormat.setWriteSupportClass(job, classOf[ParquetWriteSupport])
 
     // We want to clear this temporary metadata from saving into Parquet file.
     // This metadata is only useful for detecting optional columns when pushdowning filters.
     val dataSchemaToWrite = StructType.removeMetadata(StructType.metadataKeyForOptionalField,
       dataSchema).asInstanceOf[StructType]
-    CatalystWriteSupport.setSchema(dataSchemaToWrite, conf)
+    ParquetWriteSupport.setSchema(dataSchemaToWrite, conf)
 
     // Sets flags for `CatalystSchemaConverter` (which converts Catalyst schema to Parquet schema)
     // and `CatalystWriteSupport` (writing actual rows to Parquet files).
@@ -128,6 +128,8 @@ private[sql] class ParquetFileFormat
     if (conf.get(ParquetOutputFormat.ENABLE_JOB_SUMMARY) == null) {
       conf.setBoolean(ParquetOutputFormat.ENABLE_JOB_SUMMARY, false)
     }
+
+    ParquetFileFormat.redirectParquetLogs()
 
     new OutputWriterFactory {
       override def newInstance(
@@ -266,7 +268,7 @@ private[sql] class ParquetFileFormat
     true
   }
 
-  override private[sql] def buildReaderWithPartitionValues(
+  override def buildReaderWithPartitionValues(
       sparkSession: SparkSession,
       dataSchema: StructType,
       partitionSchema: StructType,
@@ -293,14 +295,14 @@ private[sql] class ParquetFileFormat
       ParquetReadSupport.SPARK_ROW_REQUESTED_SCHEMA,
       ParquetSchemaConverter.checkFieldNames(requiredSchema).json)
     hadoopConf.set(
-      CatalystWriteSupport.SPARK_ROW_SCHEMA,
+      ParquetWriteSupport.SPARK_ROW_SCHEMA,
       ParquetSchemaConverter.checkFieldNames(requiredSchema).json)
 
     // We want to clear this temporary metadata from saving into Parquet file.
     // This metadata is only useful for detecting optional columns when pushdowning filters.
     val dataSchemaToWrite = StructType.removeMetadata(StructType.metadataKeyForOptionalField,
       requiredSchema).asInstanceOf[StructType]
-    CatalystWriteSupport.setSchema(dataSchemaToWrite, hadoopConf)
+    ParquetWriteSupport.setSchema(dataSchemaToWrite, hadoopConf)
 
     // Sets flags for `CatalystSchemaConverter`
     hadoopConf.setBoolean(
@@ -366,13 +368,14 @@ private[sql] class ParquetFileFormat
         vectorizedReader
       } else {
         logDebug(s"Falling back to parquet-mr")
+        // ParquetRecordReader returns UnsafeRow
         val reader = pushed match {
           case Some(filter) =>
-            new ParquetRecordReader[InternalRow](
+            new ParquetRecordReader[UnsafeRow](
               new ParquetReadSupport,
               FilterCompat.get(filter, null))
           case _ =>
-            new ParquetRecordReader[InternalRow](new ParquetReadSupport)
+            new ParquetRecordReader[UnsafeRow](new ParquetReadSupport)
         }
         reader.initialize(split, hadoopAttemptContext)
         reader
@@ -392,8 +395,13 @@ private[sql] class ParquetFileFormat
         // This is a horrible erasure hack...  if we type the iterator above, then it actually check
         // the type in next() and we get a class cast exception.  If we make that function return
         // Object, then we can defer the cast until later!
-        iter.asInstanceOf[Iterator[InternalRow]]
+        if (partitionSchema.length == 0) {
+          // There is no partition columns
+          iter.asInstanceOf[Iterator[InternalRow]]
+        } else {
+          iter.asInstanceOf[Iterator[InternalRow]]
             .map(d => appendPartitionColumns(joinedRow(d, file.partitionValues)))
+        }
       }
     }
   }
@@ -416,7 +424,7 @@ private[sql] class ParquetFileFormat
  * writes the data to the path used to generate the output writer. Callers of this factory
  * has to ensure which files are to be considered as committed.
  */
-private[sql] class ParquetOutputWriterFactory(
+private[parquet] class ParquetOutputWriterFactory(
     sqlConf: SQLConf,
     dataSchema: StructType,
     hadoopConf: Configuration,
@@ -433,14 +441,14 @@ private[sql] class ParquetOutputWriterFactory(
     // bundled with `ParquetOutputFormat[Row]`.
     job.setOutputFormatClass(classOf[ParquetOutputFormat[Row]])
 
-    ParquetOutputFormat.setWriteSupportClass(job, classOf[CatalystWriteSupport])
+    ParquetOutputFormat.setWriteSupportClass(job, classOf[ParquetWriteSupport])
 
     // We want to clear this temporary metadata from saving into Parquet file.
-    // This metadata is only useful for detecting optional columns when pushdowning filters.
+    // This metadata is only useful for detecting optional columns when pushing down filters.
     val dataSchemaToWrite = StructType.removeMetadata(
       StructType.metadataKeyForOptionalField,
       dataSchema).asInstanceOf[StructType]
-    CatalystWriteSupport.setSchema(dataSchemaToWrite, conf)
+    ParquetWriteSupport.setSchema(dataSchemaToWrite, conf)
 
     // Sets flags for `CatalystSchemaConverter` (which converts Catalyst schema to Parquet schema)
     // and `CatalystWriteSupport` (writing actual rows to Parquet files).
@@ -465,12 +473,12 @@ private[sql] class ParquetOutputWriterFactory(
    * Returns a [[OutputWriter]] that writes data to the give path without using
    * [[OutputCommitter]].
    */
-  override private[sql] def newWriter(path: String): OutputWriter = new OutputWriter {
+  override def newWriter(path: String): OutputWriter = new OutputWriter {
 
     // Create TaskAttemptContext that is used to pass on Configuration to the ParquetRecordWriter
-    private val hadoopTaskAttempId = new TaskAttemptID(new TaskID(new JobID, TaskType.MAP, 0), 0)
+    private val hadoopTaskAttemptId = new TaskAttemptID(new TaskID(new JobID, TaskType.MAP, 0), 0)
     private val hadoopAttemptContext = new TaskAttemptContextImpl(
-      serializableConf.value, hadoopTaskAttempId)
+      serializableConf.value, hadoopTaskAttemptId)
 
     // Instance of ParquetRecordWriter that does not use OutputCommitter
     private val recordWriter = createNoCommitterRecordWriter(path, hadoopAttemptContext)
@@ -505,14 +513,14 @@ private[sql] class ParquetOutputWriterFactory(
       dataSchema: StructType,
       context: TaskAttemptContext): OutputWriter = {
     throw new UnsupportedOperationException(
-      "this verison of newInstance not supported for " +
+      "this version of newInstance not supported for " +
         "ParquetOutputWriterFactory")
   }
 }
 
 
 // NOTE: This class is instantiated and used on executor side only, no need to be serializable.
-private[sql] class ParquetOutputWriter(
+private[parquet] class ParquetOutputWriter(
     path: String,
     bucketId: Option[Int],
     context: TaskAttemptContext)
@@ -550,12 +558,13 @@ private[sql] class ParquetOutputWriter(
 
   override def write(row: Row): Unit = throw new UnsupportedOperationException("call writeInternal")
 
-  override protected[sql] def writeInternal(row: InternalRow): Unit = recordWriter.write(null, row)
+  override def writeInternal(row: InternalRow): Unit = recordWriter.write(null, row)
 
   override def close(): Unit = recordWriter.close(context)
 }
 
-private[sql] object ParquetFileFormat extends Logging {
+
+object ParquetFileFormat extends Logging {
   /**
    * If parquet's block size (row group size) setting is larger than the min split size,
    * we use parquet's block size setting as the min split size. Otherwise, we will create
@@ -609,7 +618,7 @@ private[sql] object ParquetFileFormat extends Logging {
     })
 
     conf.set(
-      CatalystWriteSupport.SPARK_ROW_SCHEMA,
+      ParquetWriteSupport.SPARK_ROW_SCHEMA,
       ParquetSchemaConverter.checkFieldNames(dataSchema).json)
 
     // Tell FilteringParquetRowInputFormat whether it's okay to cache Parquet and FS metadata
@@ -665,7 +674,7 @@ private[sql] object ParquetFileFormat extends Logging {
         Some(Try(DataType.fromJson(serializedSchema.get))
           .recover { case _: Throwable =>
             logInfo(
-              s"Serialized Spark schema in Parquet key-value metadata is not in JSON format, " +
+              "Serialized Spark schema in Parquet key-value metadata is not in JSON format, " +
                 "falling back to the deprecated DataType.fromCaseClassString parser.")
             LegacyTypeStringParser.parse(serializedSchema.get)
           }
@@ -702,7 +711,7 @@ private[sql] object ParquetFileFormat extends Logging {
    * distinguish binary and string).  This method generates a correct schema by merging Metastore
    * schema data types and Parquet schema field names.
    */
-  private[sql] def mergeMetastoreParquetSchema(
+  def mergeMetastoreParquetSchema(
       metastoreSchema: StructType,
       parquetSchema: StructType): StructType = {
     def schemaConflictMessage: String =
@@ -778,8 +787,7 @@ private[sql] object ParquetFileFormat extends Logging {
     val assumeBinaryIsString = sparkSession.sessionState.conf.isParquetBinaryAsString
     val assumeInt96IsTimestamp = sparkSession.sessionState.conf.isParquetINT96AsTimestamp
     val writeLegacyParquetFormat = sparkSession.sessionState.conf.writeLegacyParquetFormat
-    val serializedConf =
-      new SerializableConfiguration(sparkSession.sessionState.newHadoopConf())
+    val serializedConf = new SerializableConfiguration(sparkSession.sessionState.newHadoopConf())
 
     // !! HACK ALERT !!
     //
@@ -880,7 +888,7 @@ private[sql] object ParquetFileFormat extends Logging {
     Try(DataType.fromJson(schemaString).asInstanceOf[StructType]).recover {
       case _: Throwable =>
         logInfo(
-          s"Serialized Spark schema in Parquet key-value metadata is not in JSON format, " +
+          "Serialized Spark schema in Parquet key-value metadata is not in JSON format, " +
             "falling back to the deprecated DataType.fromCaseClassString parser.")
         LegacyTypeStringParser.parse(schemaString).asInstanceOf[StructType]
     }.recoverWith {
@@ -926,4 +934,9 @@ private[sql] object ParquetFileFormat extends Logging {
       // should be removed after this issue is fixed.
     }
   }
+
+  /**
+   * ParquetFileFormat.prepareWrite calls this function to initialize `redirectParquetLogsViaSLF4J`.
+   */
+  def redirectParquetLogs(): Unit = {}
 }
