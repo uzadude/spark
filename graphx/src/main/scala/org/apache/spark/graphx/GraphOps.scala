@@ -439,7 +439,7 @@ class GraphOps[VD: ClassTag, ED: ClassTag](graph: Graph[VD, ED]) extends Seriali
    * Compute the connected component membership of each vertex and return a graph with the vertex
    * value containing the lowest vertex id in the connected component containing that vertex.
    *
-   * @see [[org.apache.spark.graphx.lib.ConnectedComponents$#run]]
+   * @see `org.apache.spark.graphx.lib.ConnectedComponents.run`
    */
   def connectedComponents(): Graph[VertexId, ED] = {
     ConnectedComponents.run(graph)
@@ -449,7 +449,7 @@ class GraphOps[VD: ClassTag, ED: ClassTag](graph: Graph[VD, ED]) extends Seriali
    * Compute the connected component membership of each vertex and return a graph with the vertex
    * value containing the lowest vertex id in the connected component containing that vertex.
    *
-   * @see [[org.apache.spark.graphx.lib.ConnectedComponents$#run]]
+   * @see `org.apache.spark.graphx.lib.ConnectedComponents.run`
    */
   def connectedComponents(maxIterations: Int): Graph[VertexId, ED] = {
     ConnectedComponents.run(graph, maxIterations)
