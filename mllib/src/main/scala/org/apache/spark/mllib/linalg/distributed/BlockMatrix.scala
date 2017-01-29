@@ -279,8 +279,9 @@ class BlockMatrix @Since("1.3.0") (
       val numberNonZeroPerRow = vectors.map(_._2.activeSize).sum.toDouble / cols.toDouble
 
       val wholeVector =
-        if (numberNonZeroPerRow <= 0.1) { // Sparse at 1/10th nnz
-        val wholeVectorBuf = VectorBuilder.zeros[Double](cols)
+        if (numberNonZeroPerRow <= 0.1) {
+          // Sparse at 1/10th nnz
+          val wholeVectorBuf = VectorBuilder.zeros[Double](cols)
           vectors.foreach { case (blockColIdx: Int, vec: BV[Double]) =>
             val offset = colsPerBlock * blockColIdx
             vec.activeIterator.foreach { case (colIdx: Int, value: Double) => wholeVectorBuf.add(offset + colIdx, value) }
@@ -296,6 +297,8 @@ class BlockMatrix @Since("1.3.0") (
         }
 
       new IndexedRow(rowIdx, wholeVector)
+    }
+    new IndexedRowMatrix(rows)
   }
 
   /**
